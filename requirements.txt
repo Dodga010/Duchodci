@@ -1,0 +1,14 @@
+# --- Základní knihovny ---
+streamlit>=1.37
+pandas>=2.1
+numpy>=1.26
+
+# --- Interaktivní grafy ---
+plotly>=5.20
+
+# --- Čtení Excel souborů ---
+openpyxl>=3.1      # .xlsx
+xlrd>=2.0          # (volitelné) .xls
+
+# --- (volitelně) výkon / kompatibilita ---
+pyarrow>=15.0      # rychlejší CSV/Parquet (pandas automaticky využije, pokud je dostupné)
