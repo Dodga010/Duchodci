@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -10,261 +9,179 @@ try:
 except Exception:
     PLOTLY = False
 
-st.set_page_config(page_title="📊 Prezentace dat – Auto dashboard", layout="wide")
+st.set_page_config(page_title="📊 Bezpečná analýza dat", layout="wide")
+st.title("📊 Interaktivní analýza dat – SAFE verze")
 
-st.title("📊 Auto‑Dashboard pro prezentaci dat")
-st.write("""
-Nahraj Excel/CSV a aplikace **automaticky navrhne** vhodné vizualizace podle typu dat.
-Přepnutím do **Režimu prezentace** skryješ ovládací prvky a získáš čisté slidy s grafy.
-""")
+st.write(
+    "Tato verze aplikace je odolná vůči chybám v grafických knihovnách."
+)
 
-# ===== Sidebar: upload & options =====
-st.sidebar.header("🗂️ Data")
-uploaded = st.sidebar.file_uploader("Nahraj soubor (.xlsx, .xls, .csv)", type=["xlsx","xls","csv"])
-
-# CSV options
-csv_sep = st.sidebar.selectbox("Oddělovač (CSV)", [",",";","\t","|"], index=1)
-csv_enc = st.sidebar.selectbox("Kódování (CSV)", ["utf-8","cp1250","latin1"], index=0)
-header_row = st.sidebar.number_input("Řádek hlavičky (0‑index)", min_value=0, value=0, step=1)
-
-st.sidebar.header("🖥️ Zobrazení")
-preset = st.sidebar.selectbox("Šablona dashboardu", [
-    "Přehled (auto)",
-    "Dotazník – demografie & odpovědi",
-    "Numerika & korelace",
-    "Časové řady"
-])
-presentation_mode = st.sidebar.toggle("🎤 Režim prezentace", value=False)
-show_table = st.sidebar.toggle("Zobrazit tabulku dat", value=False)
-
-# ===== Helpers =====
-def safe_read(file):
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        sep = csv_sep.replace("\t","\t")
-        return pd.read_csv(file, sep=sep, encoding=csv_enc, header=header_row)
-    else:
-        # Excel
+# ----------- Pomocné funkce -----------
+def safe_bar(df, x, y, title=""):
+    if df is None or len(df) == 0:
+        st.info("Žádná data pro graf.")
+        return
+    df = df.copy()
+    df.columns = [str(c) for c in df.columns]
+    if x not in df.columns or y not in df.columns:
+        st.warning(f"Nelze vykreslit graf: chybí sloupce '{x}' nebo '{y}'.")
+        st.dataframe(df.head(20), use_container_width=True)
+        return
+    if PLOTLY:
         try:
-            import openpyxl  # noqa: F401
+            fig = px.bar(df, x=x, y=y, title=title)
+            st.plotly_chart(fig, use_container_width=True)
+            return
+        except Exception as e:
+            st.warning(f"Plotly selhal ({type(e).__name__}): přepínám na jednoduchý graf.")
+    st.bar_chart(df.set_index(x)[y])
+
+def safe_hist(df, col, title=""):
+    if col not in df.columns:
+        st.warning(f"Sloupec '{col}' nebyl nalezen.")
+        return
+    if PLOTLY:
+        try:
+            fig = px.histogram(df, x=col, nbins=30, marginal="box", title=title or f"Histogram: {col}")
+            st.plotly_chart(fig, use_container_width=True)
+            return
+        except Exception as e:
+            st.warning(f"Plotly histogram selhal ({type(e).__name__}). Zobrazuji jednoduchý graf.")
+    st.line_chart(df[col])
+
+# ----------- Načtení dat -----------
+st.sidebar.header("⚙️ Nastavení")
+uploaded = st.sidebar.file_uploader("Nahraj datový soubor", type=["xlsx", "xls", "csv"])
+
+read_kwargs = {}
+delimiter = None
+sheet_name = None
+if uploaded is not None:
+    if uploaded.name.lower().endswith(".csv"):
+        delimiter = st.sidebar.selectbox("Oddělovač (CSV)", [",", ";", "\t", "|"], index=1)
+        encoding = st.sidebar.selectbox("Kódování", ["utf-8", "cp1250", "latin1"], index=0)
+        header_row = st.sidebar.number_input("Řádek hlavičky (0-index)", min_value=0, value=0, step=1)
+        read_kwargs.update({"sep": delimiter.replace("\t", "\\t"), "encoding": encoding, "header": header_row})
+    else:
+        try:
+            import openpyxl  # noqa
         except Exception:
-            st.warning("Pro čtení .xlsx je vhodné mít nainstalované openpyxl.")
-        return pd.read_excel(file)
+            st.warning("Pro načtení .xlsx je potřeba modul openpyxl.")
+        try:
+            xls = pd.ExcelFile(uploaded)
+            sheets = xls.sheet_names
+            sheet_name = st.sidebar.selectbox("Vyber list v Excelu", sheets, index=0)
+        except Exception as e:
+            st.sidebar.error(f"Chyba při čtení Excel souboru: {e}")
 
 @st.cache_data(show_spinner=False)
-def load(file):
-    df = safe_read(file)
-    # Gentle parsing to detect numerics/datetimes
-    for col in df.columns:
-        if df[col].dtype == object:
-            # try numeric
-            try:
-                as_num = pd.to_numeric(df[col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
-                if as_num.notna().mean() > 0.6:
-                    df[col] = as_num
-                    continue
-            except Exception:
-                pass
-            # try datetime
-            try:
-                as_dt = pd.to_datetime(df[col], errors="coerce")
-                if as_dt.notna().mean() > 0.6:
-                    df[col] = as_dt
-            except Exception:
-                pass
-    # Create Respondent_ID if none unique id exists
-    potential_ids = [c for c in df.columns if df[c].is_unique and df[c].notna().all()]
-    if not potential_ids:
-        df.insert(0, "Respondent_ID", range(1, len(df)+1))
-    return df
+def load_data(file, sheet, kwargs):
+    if file.name.lower().endswith(".csv"):
+        return pd.read_csv(file, **kwargs)
+    else:
+        return pd.read_excel(file, sheet_name=sheet)
 
-def type_buckets(df):
-    num = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    dt = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
-    cat = [c for c in df.columns if c not in num and c not in dt]
-    return num, dt, cat
+df = None
+if uploaded is not None:
+    try:
+        df = load_data(uploaded, sheet_name, read_kwargs)
+    except Exception as e:
+        st.error(f"❌ Nepodařilo se načíst data: {e}")
 
-def likert_candidates(df, cat_cols):
-    # Heuristic: columns with limited set of ordered labels (1–5, strongly disagree–agree)
-    out = []
-    scale_words = ["souhlasím", "nesouhlasím", "agree", "disagree", "spokojen", "hodnocení"]
-    for c in cat_cols:
-        vals = pd.Series(df[c].dropna().astype(str).unique())
-        if 2 <= len(vals) <= 7:
-            text = " ".join(vals.str.lower().tolist())
-            if any(w in text for w in scale_words) or vals.str.match(r"^[1-7]$").all():
-                out.append(c)
-    return out
-
-def top_k_categories(s, k=20):
-    vc = s.astype(str).value_counts().sort_values(ascending=False)
-    if len(vc) > k:
-        vc = vc.head(k)
-    return vc.reset_index().rename(columns={"index": s.name, s.name: "Počet"})
-
-# ===== Load =====
-if not uploaded:
-    st.info("⬆️ Nahraj soubor a já navrhnu vizualizace.")
+if df is None:
+    st.info("⬆️ Nahraj soubor a začneme.")
     st.stop()
 
-df = load(uploaded)
-nrows, ncols = df.shape
-st.success(f"Načteno {nrows:,} řádků × {ncols} sloupců z **{uploaded.name}**")
+# ----------- Předzpracování -----------
+for col in df.columns:
+    if df[col].dtype == object:
+        try:
+            cast_num = pd.to_numeric(df[col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+            if cast_num.notna().mean() > 0.5:
+                df[col] = cast_num
+                continue
+        except Exception:
+            pass
+        try:
+            cast_dt = pd.to_datetime(df[col], errors="coerce")
+            if cast_dt.notna().mean() > 0.5:
+                df[col] = cast_dt
+        except Exception:
+            pass
 
-if show_table and not presentation_mode:
-    st.dataframe(df.head(200), use_container_width=True)
+numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+datetime_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+categorical_cols = [c for c in df.columns if (c not in numeric_cols and c not in datetime_cols)]
 
-# ===== Auto buckets =====
-numeric_cols, datetime_cols, categorical_cols = type_buckets(df)
+if not any(df[c].is_unique and df[c].notna().all() for c in df.columns):
+    df.insert(0, "Respondent_ID", range(1, len(df) + 1))
+    categorical_cols.insert(0, "Respondent_ID")
 
-# ===== Templates =====
-def section_title(text):
-    if not presentation_mode:
-        st.subheader(text)
+st.success(f"Soubor **{uploaded.name}** načten. Počet řádků: **{len(df):,}**, sloupců: **{df.shape[1]}**")
+
+# ----------- Filtrování -----------
+with st.expander("🔍 Filtrování (volitelné)"):
+    filters = {}
+    cols_left, cols_right = st.columns(2)
+    half = (len(categorical_cols) + 1) // 2
+    for i, col in enumerate(categorical_cols):
+        vals = sorted([v for v in pd.Series(df[col].dropna().unique()).astype(str)])
+        selected = st.multiselect(f"{col}", vals, default=vals)
+        filters[col] = selected
+    for col, selected in filters.items():
+        if selected:
+            df = df[df[col].astype(str).isin(selected)]
+
+st.subheader("👀 Náhled dat")
+st.dataframe(df.head(100), use_container_width=True)
+
+# ----------- Vizualizace -----------
+st.subheader("📈 Distribuce & rozdělení")
+left, right = st.columns(2)
+
+with left:
+    if numeric_cols:
+        num_col = st.selectbox("Numerický sloupec", numeric_cols, key="num_hist")
+        safe_hist(df, num_col, title=f"Histogram: {num_col}")
     else:
-        st.markdown(f"### {text}")
+        st.info("Nenalezen žádný numerický sloupec.")
 
-# ---- Template: Přehled (auto) ----
-if preset == "Přehled (auto)":
-    c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Počet záznamů", f"{nrows:,}")
-    with c2: st.metric("Numerické sloupce", str(len(numeric_cols)))
-    with c3: st.metric("Kategorické / Datumové", f"{len(categorical_cols)} / {len(datetime_cols)}")
-
-    # Categorical summary
+with right:
     if categorical_cols:
-        section_title("Kategorie – top rozdělení")
-        cols = st.columns(2)
-        for i, col in enumerate(categorical_cols[:4]):
-            data = top_k_categories(df[col])
-            if PLOTLY:
-                fig = px.bar(data, x=col, y="Počet", title=f"{col} – top kategorie")
-                cols[i % 2].plotly_chart(fig, use_container_width=True)
-            else:
-                cols[i % 2].bar_chart(data.set_index(col))
-
-    # Numeric distributions
-    if numeric_cols:
-        section_title("Numerika – rozdělení")
-        cols = st.columns(2)
-        for i, col in enumerate(numeric_cols[:4]):
-            if PLOTLY:
-                fig = px.histogram(df, x=col, nbins=30, marginal="box", title=f"Histogram: {col}")
-                cols[i % 2].plotly_chart(fig, use_container_width=True)
-            else:
-                cols[i % 2].line_chart(df[col])
-
-    # Correlation
-    if len(numeric_cols) >= 2:
-        section_title("Korelace (numerika)")
-        corr = df[numeric_cols].corr(numeric_only=True)
-        if PLOTLY:
-            fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns,
-                                            colorbar=dict(title="r")))
-            fig.update_layout(margin=dict(l=40,r=10,t=30,b=40), title="Korelační matice")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.dataframe(corr, use_container_width=True)
-
-# ---- Template: Dotazník ----
-if preset == "Dotazník – demografie & odpovědi":
-    # Guess demographics by common names
-    demo_keywords = ["pohlaví","gender","věk","age","vzdělání","education","kraj","region","město","obec"]
-    demo_cols = [c for c in categorical_cols if any(k in c.lower() for k in demo_keywords)]
-    if demo_cols:
-        section_title("Demografie")
-        cols = st.columns(2)
-        for i, col in enumerate(demo_cols[:6]):
-            data = top_k_categories(df[col])
-            if PLOTLY:
-                fig = px.bar(data, x=col, y="Počet", title=col)
-                cols[i % 2].plotly_chart(fig, use_container_width=True)
-            else:
-                cols[i % 2].bar_chart(data.set_index(col))
+        cat_col = st.selectbox("Kategorický sloupec", categorical_cols, key="cat_counts")
+        vc = df[cat_col].astype(str).value_counts().reset_index()
+        xname = str(cat_col)
+        yname = "Počet hodnot"
+        vc.columns = [xname, yname]
+        safe_bar(vc, x=xname, y=yname, title=f"{xname} – rozdělení")
     else:
-        st.info("Nenalezeny typické demografické sloupce – zobrazím obecné kategorie.")
-        section_title("Kategorie (obecné)")
-        cols = st.columns(2)
-        for i, col in enumerate(categorical_cols[:4]):
-            data = top_k_categories(df[col])
-            if PLOTLY:
-                fig = px.bar(data, x=col, y="Počet", title=col)
-                cols[i % 2].plotly_chart(fig, use_container_width=True)
-            else:
-                cols[i % 2].bar_chart(data.set_index(col))
+        st.info("Nenalezen žádný kategorický sloupec.")
 
-    # Likert / rating style
-    likerts = likert_candidates(df, categorical_cols)
-    rating_like = [c for c in df.columns if any(w in c.lower() for w in ["hodnocení","rating","skóre","score"])]
-    q_cols = list(dict.fromkeys(likerts + rating_like))
-    if q_cols:
-        section_title("Hodnocení / Likert")
-        for col in q_cols[:6]:
-            # try to order categories if numeric-like
-            s = df[col].astype(str)
-            ordered = None
-            if s.str.match(r"^[1-7]$").all():
-                ordered = sorted(s.unique(), key=lambda x:int(x))
-            if PLOTLY:
-                counts = s.value_counts().reindex(ordered) if ordered else s.value_counts()
-                data = counts.reset_index().rename(columns={"index": col, col: "Počet"})
-                fig = px.bar(data, x=col, y="Počet", title=col)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.bar_chart(s.value_counts())
+# ----------- Porovnání -----------
+st.subheader("🔗 Porovnání a vztahy")
+if numeric_cols and categorical_cols:
+    group_num = st.selectbox("Numerický (agregace)", numeric_cols, key="group_num")
+    group_cat = st.selectbox("Skupina (kategorie)", categorical_cols, key="group_cat")
+    aggfunc = st.selectbox("Agregace", ["mean", "median", "sum", "count"], index=0)
+    grouped = getattr(df.groupby(group_cat, dropna=False)[group_num], aggfunc)().reset_index()
+    grouped.columns = [str(group_cat), f"{aggfunc}({group_num})"]
+    safe_bar(grouped, x=str(group_cat), y=grouped.columns[1], title=f"{aggfunc.upper()} {group_num} podle {group_cat}")
+    st.dataframe(grouped, use_container_width=True)
+else:
+    st.info("Pro porovnání je potřeba alespoň jeden numerický a jeden kategorický sloupec.")
 
-# ---- Template: Numerika & korelace ----
-if preset == "Numerika & korelace":
-    if numeric_cols:
-        section_title("Distribuce numerických sloupců")
-        cols = st.columns(2)
-        for i, col in enumerate(numeric_cols[:6]):
-            if PLOTLY:
-                fig = px.histogram(df, x=col, nbins=40, marginal="violin", title=col)
-                cols[i % 2].plotly_chart(fig, use_container_width=True)
-            else:
-                cols[i % 2].line_chart(df[col])
-    if len(numeric_cols) >= 2:
-        section_title("Korelace")
-        corr = df[numeric_cols].corr(numeric_only=True)
-        if PLOTLY:
-            fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns,
-                                            colorbar=dict(title="r")))
-            fig.update_layout(margin=dict(l=40,r=10,t=30,b=40), title="Korelační matice")
+if len(numeric_cols) >= 2:
+    st.subheader("📊 Korelace")
+    corr = df[numeric_cols].corr(numeric_only=True)
+    if PLOTLY:
+        try:
+            fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns, colorbar=dict(title="r")))
             st.plotly_chart(fig, use_container_width=True)
-        else:
+        except Exception:
             st.dataframe(corr, use_container_width=True)
-
-    # Category vs numeric comparison (auto-pick)
-    if numeric_cols and categorical_cols:
-        section_title("Porovnání: kategorie × numerika (průměr)")
-        # pick top categorical by cardinality (but not too many)
-        cats = sorted(categorical_cols, key=lambda c: df[c].nunique())[:3]
-        for cat in cats:
-            num = numeric_cols[0]
-            grp = df.groupby(cat)[num].mean().reset_index()
-            if PLOTLY:
-                fig = px.bar(grp, x=cat, y=num, title=f"Průměr {num} podle {cat}")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.bar_chart(grp.set_index(cat))
-
-# ---- Template: Časové řady ----
-if preset == "Časové řady":
-    if datetime_cols:
-        section_title("Počty záznamů v čase")
-        dtc = datetime_cols[0]
-        tmp = df[[dtc]].dropna().copy()
-        tmp["date"] = pd.to_datetime(tmp[dtc]).dt.date
-        series = tmp.groupby("date").size().reset_index(name="Počet")
-        if PLOTLY:
-            fig = px.line(series, x="date", y="Počet", markers=True, title=f"Aktivity podle dne ({dtc})")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.line_chart(series.set_index("date"))
     else:
-        st.info("Nenalezen žádný datumový sloupec.")
+        st.dataframe(corr, use_container_width=True)
+else:
+    st.info("Pro korelaci jsou potřeba alespoň dva numerické sloupce.")
 
-# ===== Footer / Export =====
-if not presentation_mode:
-    st.caption("Tip: Zapni 🎤 Režim prezentace v levém panelu pro čisté slidy bez ovládacích prvků.")
+st.caption("SAFE verze – ošetřené chyby, bezpečné fallbacky, robustní vykreslování grafů.")
